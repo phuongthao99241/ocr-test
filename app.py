@@ -14,14 +14,16 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
 
 from extraction import (
-    DEFAULT_MODEL,
+    DEFAULT_MODELS,
+    MODEL_OPTIONS,
     PAYMENT_CYCLES,
+    example_contract,
     extract_contract,
     validate,
 )
@@ -83,19 +85,39 @@ def blank_item() -> dict:
 with st.sidebar:
     st.header("Configuration")
 
-    api_key = st.text_input(
-        "OpenAI API key",
-        value=os.environ.get("OPENAI_API_KEY", ""),
-        type="password",
-        help="Reads OPENAI_API_KEY from the environment if set. "
-        "Never uploaded anywhere except directly to OpenAI's API.",
+    provider_label = st.selectbox(
+        "Provider",
+        options=["Google Gemini (free)", "OpenAI (paid)"],
+        index=0,
+        help="Gemini's free tier (via Google AI Studio) needs no credit card. "
+        "OpenAI requires API credit.",
     )
+    provider = "gemini" if provider_label.startswith("Google") else "openai"
+
+    if provider == "gemini":
+        api_key = st.text_input(
+            "Google AI Studio API key",
+            value=os.environ.get("GEMINI_API_KEY", ""),
+            type="password",
+            help="Free, no credit card - create one at "
+            "https://aistudio.google.com/apikey",
+        )
+    else:
+        api_key = st.text_input(
+            "OpenAI API key",
+            value=os.environ.get("OPENAI_API_KEY", ""),
+            type="password",
+            help="Reads OPENAI_API_KEY from the environment if set. "
+            "Requires API credit on your OpenAI account.",
+        )
+
     model = st.selectbox(
         "Model",
-        options=["gpt-4o-mini", "gpt-4o"],
+        options=MODEL_OPTIONS[provider],
         index=0,
-        help="Must be a model that supports Structured Outputs "
-        "(json_schema response format).",
+        key=f"model_select_{provider}",
+        help="Must be a model that supports structured/schema-constrained "
+        "JSON output.",
     )
 
     st.divider()
@@ -125,19 +147,34 @@ st.caption("Upload \u2192 Scan \u2192 Review \u2192 Confirm - one contract at a 
 if st.session_state.data is None:
     uploaded = st.file_uploader("Upload one lease contract (PDF)", type=["pdf"])
 
-    col_a, col_b = st.columns([1, 4])
+    col_a, col_b, col_c = st.columns([1, 1.6, 3])
     with col_a:
         scan_clicked = st.button("\U0001F50D Scan contract", type="primary", disabled=uploaded is None)
+    with col_b:
+        example_clicked = st.button("\U0001F4CB Try example contract")
+
+    if example_clicked:
+        st.session_state.data = example_contract()
+        st.session_state.source_text = (
+            "(No source document - this is a hand-built example so you can "
+            "try the review / edit / confirm flow without needing an API "
+            "key or any provider credit.)"
+        )
+        st.session_state.file_name = "example_contract.json"
+        st.session_state.confirmed = False
+        st.rerun()
 
     if scan_clicked:
         if not api_key:
-            st.error("Please enter your OpenAI API key in the sidebar first.")
+            st.error(f"Please enter your {provider_label} API key in the sidebar first.")
         elif uploaded is None:
             st.error("Please upload a PDF first.")
         else:
-            with st.spinner("Reading the PDF and calling the OpenAI API..."):
+            with st.spinner(f"Reading the PDF and calling {provider_label}..."):
                 try:
-                    data, text = extract_contract(uploaded, api_key=api_key, model=model)
+                    data, text = extract_contract(
+                        uploaded, provider=provider, api_key=api_key, model=model
+                    )
                     st.session_state.data = data
                     st.session_state.source_text = text
                     st.session_state.file_name = uploaded.name
@@ -148,7 +185,9 @@ if st.session_state.data is None:
 
     st.info(
         "No contract loaded yet. Upload a PDF and click **Scan contract** to "
-        "extract contract, item and payment data with OpenAI."
+        f"extract contract, item and payment data with {provider_label}, or "
+        "click **Try example contract** to explore the review UI with no "
+        "API key needed."
     )
     st.stop()
 
@@ -163,9 +202,17 @@ left, right = st.columns([2, 3])
 with left:
     st.subheader("Source document")
     st.caption(st.session_state.file_name or "")
+    source_text = st.session_state.source_text or ""
+    if not source_text.strip():
+        st.info(
+            "This PDF has no embedded text (it looks like a scan), so there's "
+            "nothing to preview here. The provider read the pages directly as "
+            "images to produce the extraction on the right - compare it "
+            "against the original PDF file itself."
+        )
     st.text_area(
         "Extracted text (read-only)",
-        value=st.session_state.source_text or "",
+        value=source_text,
         height=650,
         disabled=True,
     )
@@ -244,7 +291,7 @@ with right:
             edited_df = st.data_editor(
                 payments_df,
                 num_rows="dynamic",
-                use_container_width=True,
+                width="stretch",
                 key=f"payments_editor_{i}",
                 column_config={
                     "payment_id": st.column_config.TextColumn("Payment ID"),
@@ -316,7 +363,7 @@ with right:
         )
 
         export_payload = {
-            "exported_at": datetime.utcnow().isoformat() + "Z",
+            "exported_at": datetime.now(timezone.utc).isoformat(),
             "source_file": st.session_state.file_name,
             **data,
         }
